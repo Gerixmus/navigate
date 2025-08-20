@@ -23,7 +23,7 @@ use crossterm::{
 fn main() {
     let path = current_dir().unwrap();
         
-    let root = Node::new(path);
+    let root = Node::new(path, None);
 
     let _result = create_file_leafs(&root);
 
@@ -31,6 +31,7 @@ fn main() {
 }
 
 fn select_file(root: Rc<RefCell<Node>>) -> Result<(), Error> {
+    let _keep_root_alive = root.clone();
     enable_raw_mode()?;
     stdout().execute(Hide)?;
 
@@ -59,27 +60,37 @@ fn display_directory(mut node: Rc<RefCell<Node>>) -> Result<(), Error> {
                 kind: KeyEventKind::Press,
                 ..
             }) => {
-                position = (position + 1) % node.borrow().children.len();
+                let len = node.borrow().children.len();
+                position = (position + 1) % len;
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Up,
                 kind: KeyEventKind::Press,
                 ..
             }) => {
-                position = (position + node.borrow().children.len() - 1) % node.borrow().children.len();
+                let len = node.borrow().children.len();
+                position = (position + len - 1) % len;
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Right,
                 kind: KeyEventKind::Press,
                 ..
             }) => {
+                let selected = node.borrow().children[position].clone();
+
+                if !selected.borrow().path.is_dir() {
+                    continue;
+                }
+
+                if selected.borrow().children.is_empty() {
+                    create_file_leafs(&selected)?;
+                }
+
                 let len = node.borrow().children.len();
-                let new_node = node.borrow().children[position].clone();
-                create_file_leafs(&new_node)?;
                 clear_terminal(0, len as u16)?;
                 stdout().execute(MoveTo(0, 0))?;
 
-                node = new_node;
+                node = selected;
                 position = 0;
             }
             Event::Key(KeyEvent {
@@ -88,7 +99,12 @@ fn display_directory(mut node: Rc<RefCell<Node>>) -> Result<(), Error> {
                 ..
             }) => {
                 clear_terminal(0, node.borrow().children.len() as u16)?;
-                return Ok(());
+                    if let Some(parent) = node.clone().borrow().parent.upgrade() {
+                        node = parent;
+                        // TODO: recalculate position
+                        position = 0;
+                    } else {
+                    }
             }
             _ => {}
         }
@@ -118,10 +134,10 @@ struct Node {
 }
 
 impl Node {
-    fn new(path: PathBuf) -> Rc<RefCell<Self>> {
+    fn new(path: PathBuf, parent: Option<&Rc<RefCell<Node>>>) -> Rc<RefCell<Self>> {
         Rc::new(RefCell::new(Node {
             path,
-            parent: Weak::new(),
+            parent: parent.map(Rc::downgrade).unwrap_or_else(Weak::new),
             children: vec![]
         }))
     }
@@ -152,9 +168,7 @@ fn create_file_leafs(node: &Rc<RefCell<Node>>) -> Result<(), Error> {
     for entry in entries {
         let path = entry?.path();
         
-        let child = Node::new(path);
-
-        child.borrow_mut().parent = Rc::downgrade(node);
+        let child = Node::new(path, Some(node));
 
         node.borrow_mut().children.push(child);
     }
