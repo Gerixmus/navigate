@@ -1,4 +1,6 @@
+use std::cell::RefCell;
 use std::fmt;
+use std::rc::{Rc, Weak};
 use std::{
     env::current_dir,
     fs::read_dir,
@@ -20,28 +22,27 @@ use crossterm::{
 
 fn main() {
     let path = current_dir().unwrap();
-    let mut root = Node {
-        path: path,
-        children: vec![],
-    };
-    let _result = create_file_leafs(&mut root);
+        
+    let root = Node::new(path);
 
-    select_file(&mut root);
+    let _result = create_file_leafs(&root);
+
+    select_file(root);
 }
 
-fn select_file(root: &mut Node) -> Result<(), Error> {
+fn select_file(root: Rc<RefCell<Node>>) -> Result<(), Error> {
     enable_raw_mode()?;
     stdout().execute(Hide)?;
 
-    display_directory(root);
+    display_directory(root)?;
 
     disable_raw_mode()?;
     Ok(())
 }
 
-fn display_directory(mut node: &mut Node) -> Result<(), Error> {
+fn display_directory(mut node: Rc<RefCell<Node>>) -> Result<(), Error> {
     let mut position = 0;
-    display_folder(position, &node.children);
+    display_folder(position, &node.borrow().children);
     loop {
         let event = read()?;
 
@@ -58,51 +59,53 @@ fn display_directory(mut node: &mut Node) -> Result<(), Error> {
                 kind: KeyEventKind::Press,
                 ..
             }) => {
-                position = (position + 1) % node.children.len();
+                position = (position + 1) % node.borrow().children.len();
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Up,
                 kind: KeyEventKind::Press,
                 ..
             }) => {
-                position = (position + node.children.len() - 1) % node.children.len();
+                position = (position + node.borrow().children.len() - 1) % node.borrow().children.len();
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Right,
                 kind: KeyEventKind::Press,
                 ..
             }) => {
-                let len = node.children.len();
-                let new_node = &mut node.children[position];
-                create_file_leafs(new_node);
+                let len = node.borrow().children.len();
+                let new_node = node.borrow().children[position].clone();
+                create_file_leafs(&new_node)?;
                 clear_terminal(0, len as u16)?;
                 stdout().execute(MoveTo(0, 0))?;
-                display_directory(new_node);
+
+                node = new_node;
+                position = 0;
             }
             Event::Key(KeyEvent {
                 code: KeyCode::Left,
                 kind: KeyEventKind::Press,
                 ..
             }) => {
-                clear_terminal(0, node.children.len() as u16)?;
+                clear_terminal(0, node.borrow().children.len() as u16)?;
                 return Ok(());
             }
             _ => {}
         }
 
-        clear_terminal(0, node.children.len() as u16)?;
+        clear_terminal(0, node.borrow().children.len() as u16)?;
         stdout().execute(MoveTo(0, 0))?;
-        display_folder(position, &node.children);
+        display_folder(position, &node.borrow().children);
     }
     Ok(())
 }
 
-fn display_folder(position: usize, children: &[Node]) {
+fn display_folder(position: usize, children: &[Rc<RefCell<Node>>]) {
     for i in 0..children.len() {
         if i == position {
-            println!("{}", children[i].to_string().magenta());
+            println!("{}", children[i].borrow().to_string().magenta());
         } else {
-            println!("{}", children[i])
+            println!("{}", children[i].borrow())
         }
     }
 }
@@ -110,7 +113,18 @@ fn display_folder(position: usize, children: &[Node]) {
 #[derive(Debug)]
 struct Node {
     path: PathBuf,
-    children: Vec<Node>,
+    parent: Weak<RefCell<Node>>,
+    children: Vec<Rc<RefCell<Node>>>,
+}
+
+impl Node {
+    fn new(path: PathBuf) -> Rc<RefCell<Self>> {
+        Rc::new(RefCell::new(Node {
+            path,
+            parent: Weak::new(),
+            children: vec![]
+        }))
+    }
 }
 
 impl fmt::Display for Node {
@@ -133,13 +147,16 @@ fn clear_terminal(start: u16, end: u16) -> std::io::Result<()> {
     Ok(())
 }
 
-fn create_file_leafs(node: &mut Node) -> Result<(), Error> {
-    for entry in read_dir(&node.path)? {
+fn create_file_leafs(node: &Rc<RefCell<Node>>) -> Result<(), Error> {
+    let entries = read_dir(&node.borrow().path)?;
+    for entry in entries {
         let path = entry?.path();
-        node.children.push(Node {
-            path: path,
-            children: vec![],
-        });
+        
+        let child = Node::new(path);
+
+        child.borrow_mut().parent = Rc::downgrade(node);
+
+        node.borrow_mut().children.push(child);
     }
     Ok(())
 }
